@@ -225,6 +225,10 @@ class ConcurEngine:
     def block_pool(self):
         return self._engine.block_pool
 
+    @property
+    def kv_cache(self):
+        return self._engine.kv_cache
+
     def snapshot(self) -> dict:
         """Return engine snapshot with CONCUR state appended."""
         snap = self._engine.snapshot()

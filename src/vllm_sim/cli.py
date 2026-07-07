@@ -165,6 +165,19 @@ def run(
         float,
         typer.Option("--gamma-us", help="Mixed-batch penalty (µs)."),
     ] = 500.0,
+    # --- Retention (staged-free k(t)) ---
+    retention: Annotated[
+        bool,
+        typer.Option("--retention/--no-retention", help="Enable step-TTL retention (Continuum-style)."),
+    ] = False,
+    retention_ttl_us: Annotated[
+        float,
+        typer.Option("--retention-ttl-us", help="TTL for retention (us)."),
+    ] = 1_000_000,
+    retention_priority: Annotated[
+        bool,
+        typer.Option("--retention-priority/--no-retention-priority", help="Admit sessions with retained KV before new arrivals."),
+    ] = False,
     # --- Output ---
     seed: Annotated[
         int,
@@ -197,16 +210,24 @@ def run(
         alpha_us=alpha_us,
         beta_us=beta_us,
         gamma_us=gamma_us,
+        retention_enabled=retention,
+        retention_ttl_us=retention_ttl_us,
+        retention_priority=retention_priority,
     )
 
     # --- Config summary ---
     cfg_lines = [
         f"[bold]Sessions:[/] {len(all_sessions)} / {total}",
         f"[bold]Arrival:[/] {arrival}" + (f" @ {rate}/s" if arrival == "poisson" else ""),
-        f"[bold]KV cache:[/] {kv_gb} GiB / {kv_mib_per_tok} MiB/tok → {config.num_gpu_blocks} blocks",
+        f"[bold]KV cache:[/] {kv_gb} GiB / {kv_mib_per_tok} MiB/tok -> {config.num_gpu_blocks} blocks",
         f"[bold]System prompt:[/] {sys_prompt_len} tokens ({sys_prompt_len // block_size} blocks) shared",
         f"[bold]Prefix cache:[/] {'on' if config.enable_prefix_cache else 'off'}",
     ]
+    if retention:
+        cfg_lines.append(
+            f"[bold]Retention:[/] TTL={retention_ttl_us/1e6:.1f}s"
+            f" priority={'on' if retention_priority else 'off'}"
+        )
     if concur:
         cfg_lines.append(
             f"[bold]CONCUR:[/] on  alpha={concur_alpha} beta={concur_beta} "
