@@ -49,40 +49,21 @@ class Scheduler:
         self.waiting.append(request)
 
     def try_admit(self, clock_us: float) -> list[Request]:
-        """Admit waiting requests until KV cache or max_seqs is exhausted."""
+        """Admit waiting requests until KV cache or max_seqs is exhausted.
+
+        When ``retention_priority`` is enabled, sessions with retained
+        KV blocks skip the FCFS queue.
+        """
         admitted: list[Request] = []
+
+        if getattr(self._cfg, "retention_priority", False):
+            admitted.extend(self._try_admit_retained(clock_us))
 
         while self.waiting and len(self.running) < self._cfg.max_num_seqs:
             req = self.waiting[0]
-
-            prompt_blocks = sum(
-                self._kv_cache.blocks_needed(s.num_tokens)
-                for s in req.segments
-            )
-            decode_blocks = self._kv_cache.blocks_needed(req.max_tokens)
-            if prompt_blocks + decode_blocks > self._total_blocks:
-                raise MemoryError(
-                    f"OOM: request {req.request_id} "
-                    f"({req.total_prompt_tokens} prompt + {req.max_tokens} decode "
-                    f"= {prompt_blocks} + {decode_blocks} = "
-                    f"{prompt_blocks + decode_blocks} blocks "
-                    f"> {self._total_blocks} pool capacity)."
-                )
-
-            segments = [(s.content_hash, s.num_tokens) for s in req.segments]
-            block_ids, hits, misses = self._kv_cache.allocate_request(
-                req.request_id, segments
-            )
-            if block_ids is None:
+            if not self._try_admit_one(req, clock_us):
                 break
-
             self.waiting.popleft()
-            req.block_ids = block_ids
-            req.prefix_hits = hits
-            req.prefix_misses = misses
-            req.status = RequestStatus.PREFILLING
-            req.prefill_start_us = clock_us
-            self.running.append(req)
             admitted.append(req)
 
         return admitted
@@ -130,7 +111,10 @@ class Scheduler:
         self.running = [r for r in self.running if r.request_id not in finished_ids]
 
         for req in completed:
-            self._kv_cache.free_request(req.request_id)
+            self._kv_cache.retain_request(
+                req.request_id, req.session_id, req.block_ids,
+                finish_time_us=clock_us,
+            )
 
         p_total = p_hit + p_miss
         # Attention IO factor: Σ sqrt(seq_len) for requests in this batch.
@@ -159,3 +143,54 @@ class Scheduler:
 
     def get_prefilling_count(self) -> int:
         return sum(1 for r in self.running if not r.is_prefill_complete)
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _try_admit_retained(self, clock_us: float) -> list[Request]:
+        """Admit waiting requests whose session has retained blocks first."""
+        admitted: list[Request] = []
+        remaining: list[Request] = []
+
+        for req in self.waiting:
+            if len(self.running) >= self._cfg.max_num_seqs:
+                remaining.append(req)
+            elif self._kv_cache.has_retained(req.session_id) and self._try_admit_one(req, clock_us):
+                admitted.append(req)
+            else:
+                remaining.append(req)
+
+        self.waiting.clear()
+        self.waiting.extend(remaining)
+        return admitted
+
+    def _try_admit_one(self, req: Request, clock_us: float) -> bool:
+        """Try to admit a single request.  Returns True on success."""
+        prompt_blocks = sum(
+            self._kv_cache.blocks_needed(s.num_tokens) for s in req.segments
+        )
+        decode_blocks = self._kv_cache.blocks_needed(req.max_tokens)
+        if prompt_blocks + decode_blocks > self._total_blocks:
+            raise MemoryError(
+                f"OOM: request {req.request_id} "
+                f"({req.total_prompt_tokens} prompt + {req.max_tokens} decode "
+                f"= {prompt_blocks} + {decode_blocks} = "
+                f"{prompt_blocks + decode_blocks} blocks "
+                f"> {self._total_blocks} pool capacity)."
+            )
+
+        segments = [(s.content_hash, s.num_tokens) for s in req.segments]
+        block_ids, hits, misses = self._kv_cache.allocate_request(
+            req.request_id, segments
+        )
+        if block_ids is None:
+            return False
+
+        req.block_ids = block_ids
+        req.prefix_hits = hits
+        req.prefix_misses = misses
+        req.status = RequestStatus.PREFILLING
+        req.prefill_start_us = clock_us
+        self.running.append(req)
+        return True

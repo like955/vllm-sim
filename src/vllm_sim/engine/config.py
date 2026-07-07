@@ -54,6 +54,16 @@ class EngineSimConfig(BaseModel):
     gamma_us: float = Field(default=500.0, ge=0)
     """Mixed-batch penalty (µs).  ~500 µs when prefill+decode coexist."""
 
+    # --- Retention (staged-free k(t)) ---
+    retention_enabled: bool = Field(default=False)
+    """Enable Continuum-style TTL retention after request completion."""
+
+    retention_ttl_us: float = Field(default=1_000_000, ge=0)
+    """KV-cache time-to-live after request completion (µs)."""
+
+    retention_priority: bool = Field(default=False)
+    """Admit sessions with retained KV blocks ahead of new arrivals."""
+
     # ------------------------------------------------------------------
     # Derived
     # ------------------------------------------------------------------
