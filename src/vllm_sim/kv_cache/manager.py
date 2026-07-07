@@ -1,19 +1,21 @@
 """KV cache manager: the allocation / freeing layer above BlockPool."""
 
 from .block_pool import BlockPool
+from .retention import RetentionState, StepTTLPolicy
 
 
 class KVCacheManager:
-    """Orchestrates block allocation and freeing for individual requests.
+    """Orchestrates block allocation and freeing for individual requests."""
 
-    Maintains a per-request ledger (``request_id`` → list of block_ids)
-    so that all blocks belonging to a finished request can be released
-    atomically.
-    """
-
-    def __init__(self, block_pool: BlockPool) -> None:
+    def __init__(
+        self,
+        block_pool: BlockPool,
+        policy: StepTTLPolicy | None = None,
+    ) -> None:
         self.block_pool = block_pool
         self._request_blocks: dict[str, list[int]] = {}
+        self._policy = policy
+        self._retained: dict[str, RetentionState] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -82,6 +84,75 @@ class KVCacheManager:
         """Release every block owned by *request_id*."""
         block_ids = self._request_blocks.pop(request_id, [])
         self._free_blocks(block_ids)
+
+    # ------------------------------------------------------------------
+    # Retention
+    # ------------------------------------------------------------------
+
+    def retain_request(
+        self,
+        request_id: str,
+        session_id: str,
+        block_ids: list[int],
+        finish_time_us: float,
+    ) -> RetentionState | None:
+        """Finish *request_id* — keep blocks pinned if TTL > 0."""
+        self._request_blocks.pop(request_id, None)
+
+        # Free previous retention for this session (blocks were already
+        # reused by the new request via prefix-cache hits).
+        old = self._retained.pop(session_id, None)
+        if old is not None:
+            self._free_blocks(old.block_ids)
+
+        if self._policy is None:
+            self._free_blocks(block_ids)
+            return None
+
+        k = self._policy.evaluate(
+            RetentionState(session_id, list(block_ids), finish_time_us),
+            finish_time_us,
+        )
+        if k == 0:
+            self._free_blocks(block_ids)
+            return None
+
+        # k == len(block_ids): keep everything.
+        state = RetentionState(session_id, block_ids, finish_time_us)
+        self._retained[session_id] = state
+        return state
+
+    def decay_retentions(self, now_us: float) -> list[str]:
+        """Re-evaluate TTL for every retained session.
+
+        Returns *session_ids* that were fully freed.
+        """
+        if self._policy is None:
+            return []
+
+        freed: list[str] = []
+        for sid, state in list(self._retained.items()):
+            k = self._policy.evaluate(state, now_us)
+            if k == 0:
+                self._free_blocks(state.block_ids)
+                freed.append(sid)
+
+        for sid in freed:
+            del self._retained[sid]
+        return freed
+
+    def has_retained(self, session_id: str) -> bool:
+        return session_id in self._retained
+
+    @property
+    def retained_count(self) -> int:
+        """Number of requests currently in retention."""
+        return len(self._retained)
+
+    @property
+    def retained_block_count(self) -> int:
+        """Total blocks held across all retained requests."""
+        return sum(len(s.block_ids) for s in self._retained.values())
 
     # ------------------------------------------------------------------
     # Internal
