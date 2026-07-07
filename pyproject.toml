@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-sim"
+version = "0.1.0"
+description = "A discrete-event simulator for vLLM's inference engine"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "numpy>=2.5.0",
+    "pydantic>=2.13.4",
+    "typer>=0.26.8",
+]
+
+[project.scripts]
+vllm-sim = "vllm_sim.cli:app"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.uv]
+package = true
+
+[[tool.uv.index]]
+name = "tsinghua"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
