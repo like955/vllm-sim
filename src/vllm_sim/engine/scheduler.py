@@ -89,7 +89,8 @@ class Scheduler:
     def step(self, clock_us: float) -> StepResult:
         """One unified forward pass — prefill and decode compete for budget."""
         budget = self._cfg.max_num_batched_tokens
-        p_tokens = 0
+        p_hit = 0
+        p_miss = 0
         d_tokens = 0
         completed: list[Request] = []
 
@@ -98,16 +99,18 @@ class Scheduler:
                 break
 
             if not req.is_prefill_complete:
-                # Still has prompt tokens left — chunked prefill.
                 take = min(req.pending_prefill_tokens, budget)
+                # Split prefill tokens by hit/miss ratio from allocation.
+                total_blk = req.prefix_hits + req.prefix_misses
+                hit_frac = req.prefix_hits / total_blk if total_blk > 0 else 0.0
+                p_hit += int(take * hit_frac)
+                p_miss += take - int(take * hit_frac)
                 req.num_computed_tokens += take
                 budget -= take
-                p_tokens += take
                 if req.is_prefill_complete:
                     req.status = RequestStatus.DECODING
                     req.decode_start_us = clock_us
             else:
-                # Decoding — jump ahead when budget permits (vLLM "jump decoding").
                 take = min(req.max_tokens - req.num_generated_tokens, budget)
                 req.num_generated_tokens += take
                 budget -= take
@@ -117,18 +120,18 @@ class Scheduler:
                     req.finish_time_us = clock_us
                     completed.append(req)
 
-        # Remove finished requests.
         finished_ids = {r.request_id for r in completed}
         self.running = [r for r in self.running if r.request_id not in finished_ids]
 
         for req in completed:
             self._kv_cache.free_request(req.request_id)
 
-        step_us = self._timing.step_us(p_tokens, d_tokens)
+        p_total = p_hit + p_miss
+        step_us = self._timing.step_us(p_hit, p_miss, d_tokens)
         return StepResult(
             step_time_us=step_us,
             completed=completed,
-            prefill_tokens_processed=p_tokens,
+            prefill_tokens_processed=p_total,
             decode_tokens_generated=d_tokens,
         )
 

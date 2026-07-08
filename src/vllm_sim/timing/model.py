@@ -23,11 +23,12 @@ from vllm_sim.engine.config import EngineSimConfig
 class TimingModel(Protocol):
     """Callable that returns the wall-clock duration of one forward pass.
 
-    *P* is the number of prefill tokens, *D* the number of decode
-    requests in this step's batch.
+    *p_hit* is the number of prefix-cache-hit prefill tokens,
+    *p_miss* the number of tokens that actually need computation,
+    *D* the number of decode requests in this step's batch.
     """
 
-    def step_us(self, prefill_tokens: int, decode_tokens: int) -> float: ...
+    def step_us(self, p_hit: int, p_miss: int, decode_tokens: int) -> float: ...
 
 
 # ---------------------------------------------------------------------------
@@ -36,17 +37,22 @@ class TimingModel(Protocol):
 
 
 class LinearTimingModel:
-    """Linear model: ``base + cost_per_token × P + cost_per_decode × D``."""
+    """Linear model, prefix-cache aware.
+
+    Hit tokens cost a fraction (``prefix_hit_cost_ratio``) of a full
+    prefill token because their KV is already in memory.
+    """
 
     def __init__(self, config: EngineSimConfig) -> None:
         self._cfg = config
 
-    def step_us(self, prefill_tokens: int, decode_tokens: int) -> float:
-        if prefill_tokens <= 0 and decode_tokens <= 0:
+    def step_us(self, p_hit: int, p_miss: int, decode_tokens: int) -> float:
+        if p_hit <= 0 and p_miss <= 0 and decode_tokens <= 0:
             return 0.0
+        effective_p = p_miss + self._cfg.prefix_hit_cost_ratio * p_hit
         return (
             self._cfg.prefill_base_us
-            + self._cfg.prefill_us_per_token * prefill_tokens
+            + self._cfg.prefill_us_per_token * effective_p
             + self._cfg.decode_base_us
             + self._cfg.decode_us_per_token * decode_tokens
         )
@@ -58,7 +64,7 @@ class LinearTimingModel:
 
 
 class ProfileTimingModel:
-    r"""Interpolate from a 2-D profile table.
+    r"""Interpolate from a 2-D hardware profile table.
 
     The profile is a JSON file::
 
@@ -68,16 +74,11 @@ class ProfileTimingModel:
           "base_us": 120
         }
 
-    ``prefill`` maps batch token counts → latency (us).
-    ``decode`` maps concurrent request counts → per-step latency (us).
-    ``base_us`` is a fixed per-step overhead (kernel launch, etc.).
-
     For a mixed batch the model computes the *bottleneck*::
 
         step_us = base_us + max(prefill_us(P), decode_us(D))
 
-    This reflects that prefill and decode compete for the same memory
-    bandwidth in one forward pass — the slower dominates.
+    where *P* is the effective prefill token count (hits discounted).
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -97,30 +98,27 @@ class ProfileTimingModel:
             self._decode_x.append(int(x))
             self._decode_y.append(float(y))
 
-    def step_us(self, prefill_tokens: int, decode_tokens: int) -> float:
-        if prefill_tokens <= 0 and decode_tokens <= 0:
+    def step_us(self, p_hit: int, p_miss: int, decode_tokens: int) -> float:
+        effective_p = p_miss + int(0.1 * p_hit)  # hits ~10% cost
+        if effective_p <= 0 and decode_tokens <= 0:
             return 0.0
-        p_us = self._lookup(self._prefill_x, self._prefill_y, prefill_tokens)
+        p_us = self._lookup(self._prefill_x, self._prefill_y, effective_p)
         d_us = self._lookup(self._decode_x, self._decode_y, decode_tokens)
         return self._base_us + max(p_us, d_us)
 
     # ------------------------------------------------------------------
     @staticmethod
     def _lookup(xs: list[int], ys: list[float], n: int) -> float:
-        """Linear interpolation.  Clamps to endpoints."""
         if n <= 0:
             return 0.0
         if n <= xs[0]:
             return ys[0] * n / xs[0]
         if n >= xs[-1]:
-            # Extrapolate with the slope of the last segment.
             slope = (ys[-1] - ys[-2]) / (xs[-1] - xs[-2])
             return ys[-1] + slope * (n - xs[-1])
-
         i = bisect_left(xs, n)
         if xs[i] == n:
             return ys[i]
-        # Linear between (xs[i-1], ys[i-1]) and (xs[i], ys[i]).
         frac = (n - xs[i - 1]) / (xs[i] - xs[i - 1])
         return ys[i - 1] + frac * (ys[i] - ys[i - 1])
 
@@ -131,11 +129,7 @@ class ProfileTimingModel:
 
 
 def make_timing(config: EngineSimConfig) -> TimingModel:
-    """Create a timing model from config.
-
-    If ``config.timing_profile`` is set, loads a profile file;
-    otherwise returns the linear default.
-    """
+    """Create a timing model from config."""
     if config.timing_profile:
         return ProfileTimingModel(config.timing_profile)
     return LinearTimingModel(config)

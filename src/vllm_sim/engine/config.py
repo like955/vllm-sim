@@ -54,6 +54,10 @@ class EngineSimConfig(BaseModel):
     decode_base_us: float = Field(default=50.0, ge=0)
     """Fixed overhead per decode step (us)."""
 
+    prefix_hit_cost_ratio: float = Field(default=0.1, ge=0, le=1)
+    """Cost ratio of a prefix-cache-hit prefill token vs a miss token.
+    0.1 means a hit token costs 10% of a miss token."""
+
     timing_profile: str | None = Field(default=None)
     """Path to a JSON profile file for ``ProfileTimingModel``.
     When set, overrides the linear timing parameters."""
