@@ -91,6 +91,8 @@ class Scheduler:
         budget = self._cfg.max_num_batched_tokens
         p_hit = 0
         p_miss = 0
+        d_reqs = 0
+        d_mult = 0
         d_tokens = 0
         completed: list[Request] = []
 
@@ -115,6 +117,9 @@ class Scheduler:
                 req.num_generated_tokens += take
                 budget -= take
                 d_tokens += take
+                d_reqs += 1
+                if take > d_mult:
+                    d_mult = take
                 if req.num_generated_tokens >= req.max_tokens:
                     req.status = RequestStatus.FINISHED
                     req.finish_time_us = clock_us
@@ -127,7 +132,8 @@ class Scheduler:
             self._kv_cache.free_request(req.request_id)
 
         p_total = p_hit + p_miss
-        step_us = self._timing.step_us(p_hit, p_miss, d_tokens)
+        step_us = self._timing.step_us(p_hit, p_miss, d_reqs, d_mult) if d_mult > 0 \
+                  else self._timing.step_us(p_hit, p_miss, d_reqs, 0)
         return StepResult(
             step_time_us=step_us,
             completed=completed,

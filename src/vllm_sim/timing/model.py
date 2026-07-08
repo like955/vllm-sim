@@ -23,12 +23,13 @@ from vllm_sim.engine.config import EngineSimConfig
 class TimingModel(Protocol):
     """Callable that returns the wall-clock duration of one forward pass.
 
-    *p_hit* is the number of prefix-cache-hit prefill tokens,
-    *p_miss* the number of tokens that actually need computation,
-    *D* the number of decode requests in this step's batch.
+    *p_hit* / *p_miss*: prefill tokens (hits discounted).
+    *d_reqs*: number of requests that decoded this step.
+    *d_mult*: max tokens any single decode request generated (≥1,
+              the effective number of forward passes being simulated).
     """
 
-    def step_us(self, p_hit: int, p_miss: int, decode_tokens: int) -> float: ...
+    def step_us(self, p_hit: int, p_miss: int, d_reqs: int, d_mult: int) -> float: ...
 
 
 # ---------------------------------------------------------------------------
@@ -46,15 +47,18 @@ class LinearTimingModel:
     def __init__(self, config: EngineSimConfig) -> None:
         self._cfg = config
 
-    def step_us(self, p_hit: int, p_miss: int, decode_tokens: int) -> float:
-        if p_hit <= 0 and p_miss <= 0 and decode_tokens <= 0:
+    def step_us(self, p_hit: int, p_miss: int, d_reqs: int, d_mult: int) -> float:
+        if p_hit <= 0 and p_miss <= 0 and d_reqs <= 0:
             return 0.0
         effective_p = p_miss + self._cfg.prefix_hit_cost_ratio * p_hit
+        d_steps = max(d_mult, 1)  # jump decoding simulated as d_mult passes
         return (
             self._cfg.prefill_base_us
             + self._cfg.prefill_us_per_token * effective_p
-            + self._cfg.decode_base_us
-            + self._cfg.decode_us_per_token * decode_tokens
+            + d_steps * (
+                self._cfg.decode_base_us
+                + self._cfg.decode_us_per_token * d_reqs
+            )
         )
 
 
@@ -98,15 +102,16 @@ class ProfileTimingModel:
             self._decode_x.append(int(x))
             self._decode_y.append(float(y))
 
-    _OVERLAP_FRACTION = 0.3  # how much the smaller component still costs
+    _OVERLAP_FRACTION = 0.3
 
-    def step_us(self, p_hit: int, p_miss: int, decode_tokens: int) -> float:
+    def step_us(self, p_hit: int, p_miss: int, d_reqs: int, d_mult: int) -> float:
         effective_p = p_miss + int(0.1 * p_hit)
-        if effective_p <= 0 and decode_tokens <= 0:
+        if effective_p <= 0 and d_reqs <= 0:
             return 0.0
         p_us = self._lookup(self._prefill_x, self._prefill_y, effective_p)
-        d_us = self._lookup(self._decode_x, self._decode_y, decode_tokens)
-        return self._base_us + max(p_us, d_us) + self._OVERLAP_FRACTION * min(p_us, d_us)
+        d_us = self._lookup(self._decode_x, self._decode_y, d_reqs)
+        single = self._base_us + max(p_us, d_us) + self._OVERLAP_FRACTION * min(p_us, d_us)
+        return single * max(d_mult, 1)
 
     # ------------------------------------------------------------------
     @staticmethod
