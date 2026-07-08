@@ -152,23 +152,19 @@ def run(
         bool,
         typer.Option("--concur-verbose", help="Log every CONCUR window-size change."),
     ] = False,
-    # --- Timing ---
-    prefill_us: Annotated[
+    # --- Timing (analytical model) ---
+    alpha_us: Annotated[
         float,
-        typer.Option("--prefill-us", help="Prefill latency per token (us)."),
-    ] = 50.0,
-    decode_us: Annotated[
+        typer.Option("--alpha-us", help="GEMM cost per token (µs)."),
+    ] = 8.5,
+    beta_us: Annotated[
         float,
-        typer.Option("--decode-us", help="Decode latency per token (us)."),
-    ] = 200.0,
-    timing_model: Annotated[
-        Literal["linear", "profile", "analytical"],
-        typer.Option("--timing-model", help="Timing model: linear, profile, or analytical."),
-    ] = "linear",
-    timing_profile: Annotated[
-        Path | None,
-        typer.Option("--timing-profile", help="JSON profile (when --timing-model=profile)."),
-    ] = None,
+        typer.Option("--beta-us", help="Attention IO cost per sqrt(seq_len) (µs)."),
+    ] = 0.4,
+    gamma_us: Annotated[
+        float,
+        typer.Option("--gamma-us", help="Mixed-batch penalty (µs)."),
+    ] = 500.0,
     # --- Output ---
     seed: Annotated[
         int,
@@ -198,10 +194,9 @@ def run(
         enable_prefix_cache=not no_prefix_cache,
         max_num_batched_tokens=max_batched_tokens,
         max_num_seqs=max_seqs,
-        prefill_us_per_token=prefill_us,
-        decode_us_per_token=decode_us,
-        timing_model=timing_model,
-        timing_profile=str(timing_profile) if timing_profile else None,
+        alpha_us=alpha_us,
+        beta_us=beta_us,
+        gamma_us=gamma_us,
     )
 
     # --- Config summary ---

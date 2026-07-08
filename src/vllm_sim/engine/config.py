@@ -41,36 +41,17 @@ class EngineSimConfig(BaseModel):
     max_num_seqs: int = Field(default=256, ge=1)
     """Maximum number of concurrent sequences (running requests)."""
 
-    # --- Timing model (microseconds) ---
-    prefill_us_per_token: float = Field(default=50.0, ge=0)
-    """Prefill latency per token (us)."""
-
-    decode_us_per_token: float = Field(default=200.0, ge=0)
-    """Decode latency per token in the batch (us)."""
-
-    prefill_base_us: float = Field(default=100.0, ge=0)
-    """Fixed overhead per prefill step (us)."""
-
-    decode_base_us: float = Field(default=50.0, ge=0)
-    """Fixed overhead per decode step (us)."""
-
+    # --- Timing model (analytical, physics-based) ---
     prefix_hit_cost_ratio: float = Field(default=0.1, ge=0, le=1)
     """Cost ratio of a prefix-cache-hit prefill token vs a miss token."""
 
-    # --- Timing model selection ---
-    timing_model: str = Field(default="linear")
-    """"linear" (default), "profile", or "analytical"."""
-
-    timing_profile: str | None = Field(default=None)
-    """Path to a JSON profile file (when timing_model="profile")."""
-
-    analytical_alpha_us: float = Field(default=8.5, ge=0)
+    alpha_us: float = Field(default=8.5, ge=0)
     """GEMM cost per token (µs).  ~8.5 µs/token for Llama-8B on H100."""
 
-    analytical_beta_us: float = Field(default=0.4, ge=0)
+    beta_us: float = Field(default=0.4, ge=0)
     """Attention IO cost per sqrt(seq_len) (µs).  ~0.4 µs for H100."""
 
-    analytical_gamma_us: float = Field(default=500.0, ge=0)
+    gamma_us: float = Field(default=500.0, ge=0)
     """Mixed-batch penalty (µs).  ~500 µs when prefill+decode coexist."""
 
     # ------------------------------------------------------------------
