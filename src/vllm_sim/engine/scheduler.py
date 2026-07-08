@@ -132,8 +132,7 @@ class Scheduler:
             self._kv_cache.free_request(req.request_id)
 
         p_total = p_hit + p_miss
-        step_us = self._timing.step_us(p_hit, p_miss, d_reqs, d_mult) if d_mult > 0 \
-                  else self._timing.step_us(p_hit, p_miss, d_reqs, 0)
+        step_us = self._timing.step_us(p_hit, p_miss, d_reqs, d_mult)
         return StepResult(
             step_time_us=step_us,
             completed=completed,

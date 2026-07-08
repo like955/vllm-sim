@@ -51,15 +51,12 @@ class LinearTimingModel:
         if p_hit <= 0 and p_miss <= 0 and d_reqs <= 0:
             return 0.0
         effective_p = p_miss + self._cfg.prefix_hit_cost_ratio * p_hit
-        d_steps = max(d_mult, 1)  # jump decoding simulated as d_mult passes
-        return (
-            self._cfg.prefill_base_us
-            + self._cfg.prefill_us_per_token * effective_p
-            + d_steps * (
-                self._cfg.decode_base_us
-                + self._cfg.decode_us_per_token * d_reqs
+        d_cost = 0.0
+        if d_reqs > 0:
+            d_cost = max(d_mult, 1) * (
+                self._cfg.decode_base_us + self._cfg.decode_us_per_token * d_reqs
             )
-        )
+        return self._cfg.prefill_base_us + self._cfg.prefill_us_per_token * effective_p + d_cost
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +106,8 @@ class ProfileTimingModel:
         if effective_p <= 0 and d_reqs <= 0:
             return 0.0
         p_us = self._lookup(self._prefill_x, self._prefill_y, effective_p)
+        if d_reqs <= 0:
+            return self._base_us + p_us
         d_us = self._lookup(self._decode_x, self._decode_y, d_reqs)
         single = self._base_us + max(p_us, d_us) + self._OVERLAP_FRACTION * min(p_us, d_us)
         return single * max(d_mult, 1)
