@@ -136,12 +136,12 @@ class TestScheduler:
         assert req.is_prefill_complete
         assert req.status.name == "DECODING"
 
-        # Decode token-by-token (chunk_size=16 by default, but max_tokens=3).
-        # Step 1: generate up to 16 tokens, finishes after 3.
-        r3 = sched.step(clock_us=0)
-        assert req.num_generated_tokens == 3
+        # Decode: one token per step (autoregressive), 3 steps to finish.
+        for i in range(3):
+            r = sched.step(clock_us=0)
+            assert req.num_generated_tokens == i + 1
         assert req.is_finished
-        assert req in r3.completed
+        assert req in r.completed
 
     def test_chunked_prefill_with_multiple_seq(self) -> None:
         config = EngineSimConfig(

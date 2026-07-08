@@ -1,27 +1,30 @@
-"""Pluggable timing models for prefill and decode latency."""
+"""Pluggable timing models for unified prefill+decode steps."""
 
 from vllm_sim.engine.config import EngineSimConfig
 
 
 class TimingModel:
-    """Computes wall-clock duration of prefill and decode steps.
+    """Computes wall-clock duration of one unified forward pass.
 
-    The default model is linear in the number of tokens processed.
-    Override ``prefill_us`` and ``decode_us`` to implement custom
-    models (e.g. non-linear, memory-bandwidth-aware).
+    There is no separate "prefill step" or "decode step" — one forward
+    pass may mix *P* prefill tokens and *D* decode requests in the same
+    batch, just like vLLM's scheduler.
     """
 
     def __init__(self, config: EngineSimConfig) -> None:
         self._cfg = config
 
-    def prefill_us(self, num_tokens: int) -> float:
-        """Latency for prefilling *num_tokens* in a single step."""
-        if num_tokens <= 0:
-            return 0.0
-        return self._cfg.prefill_base_us + self._cfg.prefill_us_per_token * num_tokens
+    def step_us(self, prefill_tokens: int, decode_tokens: int) -> float:
+        """Latency for one batch with *P* prefill tokens and *D* decodes.
 
-    def decode_us(self, num_requests: int) -> float:
-        """Latency for one decode token across *num_requests*."""
-        if num_requests <= 0:
+        The total is linear in both dimensions: each prefill token and
+        each decode request consume memory bandwidth in one forward pass.
+        """
+        if prefill_tokens <= 0 and decode_tokens <= 0:
             return 0.0
-        return self._cfg.decode_base_us + self._cfg.decode_us_per_token * num_requests
+        return (
+            self._cfg.prefill_base_us
+            + self._cfg.prefill_us_per_token * prefill_tokens
+            + self._cfg.decode_base_us
+            + self._cfg.decode_us_per_token * decode_tokens
+        )
