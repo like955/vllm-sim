@@ -98,13 +98,15 @@ class ProfileTimingModel:
             self._decode_x.append(int(x))
             self._decode_y.append(float(y))
 
+    _OVERLAP_FRACTION = 0.3  # how much the smaller component still costs
+
     def step_us(self, p_hit: int, p_miss: int, decode_tokens: int) -> float:
-        effective_p = p_miss + int(0.1 * p_hit)  # hits ~10% cost
+        effective_p = p_miss + int(0.1 * p_hit)
         if effective_p <= 0 and decode_tokens <= 0:
             return 0.0
         p_us = self._lookup(self._prefill_x, self._prefill_y, effective_p)
         d_us = self._lookup(self._decode_x, self._decode_y, decode_tokens)
-        return self._base_us + max(p_us, d_us)
+        return self._base_us + max(p_us, d_us) + self._OVERLAP_FRACTION * min(p_us, d_us)
 
     # ------------------------------------------------------------------
     @staticmethod
