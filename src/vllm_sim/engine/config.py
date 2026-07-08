@@ -55,12 +55,23 @@ class EngineSimConfig(BaseModel):
     """Fixed overhead per decode step (us)."""
 
     prefix_hit_cost_ratio: float = Field(default=0.1, ge=0, le=1)
-    """Cost ratio of a prefix-cache-hit prefill token vs a miss token.
-    0.1 means a hit token costs 10% of a miss token."""
+    """Cost ratio of a prefix-cache-hit prefill token vs a miss token."""
+
+    # --- Timing model selection ---
+    timing_model: str = Field(default="linear")
+    """"linear" (default), "profile", or "analytical"."""
 
     timing_profile: str | None = Field(default=None)
-    """Path to a JSON profile file for ``ProfileTimingModel``.
-    When set, overrides the linear timing parameters."""
+    """Path to a JSON profile file (when timing_model="profile")."""
+
+    analytical_alpha_us: float = Field(default=8.5, ge=0)
+    """GEMM cost per token (µs).  ~8.5 µs/token for Llama-8B on H100."""
+
+    analytical_beta_us: float = Field(default=0.4, ge=0)
+    """Attention IO cost per sqrt(seq_len) (µs).  ~0.4 µs for H100."""
+
+    analytical_gamma_us: float = Field(default=500.0, ge=0)
+    """Mixed-batch penalty (µs).  ~500 µs when prefill+decode coexist."""
 
     # ------------------------------------------------------------------
     # Derived

@@ -161,9 +161,13 @@ def run(
         float,
         typer.Option("--decode-us", help="Decode latency per token (us)."),
     ] = 200.0,
+    timing_model: Annotated[
+        Literal["linear", "profile", "analytical"],
+        typer.Option("--timing-model", help="Timing model: linear, profile, or analytical."),
+    ] = "linear",
     timing_profile: Annotated[
         Path | None,
-        typer.Option("--timing-profile", help="JSON profile for hardware-aware timing model."),
+        typer.Option("--timing-profile", help="JSON profile (when --timing-model=profile)."),
     ] = None,
     # --- Output ---
     seed: Annotated[
@@ -196,6 +200,7 @@ def run(
         max_num_seqs=max_seqs,
         prefill_us_per_token=prefill_us,
         decode_us_per_token=decode_us,
+        timing_model=timing_model,
         timing_profile=str(timing_profile) if timing_profile else None,
     )
 

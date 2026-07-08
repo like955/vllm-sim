@@ -1,13 +1,15 @@
 """Timing models for unified prefill+decode forward passes.
 
-Two implementations:
-*   ``LinearTimingModel`` — simple linear formula (default).
+Three implementations:
+*   ``LinearTimingModel`` — per-token linear (default).
 *   ``ProfileTimingModel`` — interpolates from a hardware profile table.
+*   ``AnalyticalTimingModel`` — physics-based: GEMM + Attention + penalty.
 """
 
 from __future__ import annotations
 
 import json
+import math
 from bisect import bisect_left
 from pathlib import Path
 from typing import Protocol
@@ -15,21 +17,19 @@ from typing import Protocol
 from vllm_sim.engine.config import EngineSimConfig
 
 
-# ---------------------------------------------------------------------------
-# Protocol
-# ---------------------------------------------------------------------------
-
-
 class TimingModel(Protocol):
-    """Callable that returns the wall-clock duration of one forward pass.
+    """One forward pass duration.
 
     *p_hit* / *p_miss*: prefill tokens (hits discounted).
-    *d_reqs*: number of requests that decoded this step.
-    *d_mult*: max tokens any single decode request generated (≥1,
-              the effective number of forward passes being simulated).
+    *d_reqs* / *d_mult*: decode concurrency and jump-depth.
+    *seq_len_sum_sqrt*: Σ sqrt(seq_len_i) for attention IO term.
+    *is_mixed*: whether this batch mixes prefill and decode.
     """
 
-    def step_us(self, p_hit: int, p_miss: int, d_reqs: int, d_mult: int) -> float: ...
+    def step_us(
+        self, p_hit: int, p_miss: int, d_reqs: int, d_mult: int,
+        seq_len_sum_sqrt: float = 0.0, is_mixed: bool = False,
+    ) -> float: ...
 
 
 # ---------------------------------------------------------------------------
@@ -38,16 +38,15 @@ class TimingModel(Protocol):
 
 
 class LinearTimingModel:
-    """Linear model, prefix-cache aware.
-
-    Hit tokens cost a fraction (``prefix_hit_cost_ratio``) of a full
-    prefill token because their KV is already in memory.
-    """
+    """Per-token linear model, prefix-cache aware."""
 
     def __init__(self, config: EngineSimConfig) -> None:
         self._cfg = config
 
-    def step_us(self, p_hit: int, p_miss: int, d_reqs: int, d_mult: int) -> float:
+    def step_us(
+        self, p_hit: int, p_miss: int, d_reqs: int, d_mult: int,
+        seq_len_sum_sqrt: float = 0.0, is_mixed: bool = False,
+    ) -> float:
         if p_hit <= 0 and p_miss <= 0 and d_reqs <= 0:
             return 0.0
         effective_p = p_miss + self._cfg.prefix_hit_cost_ratio * p_hit
@@ -60,48 +59,34 @@ class LinearTimingModel:
 
 
 # ---------------------------------------------------------------------------
-# Profile-driven (hardware benchmark)
+# Profile-driven
 # ---------------------------------------------------------------------------
 
 
 class ProfileTimingModel:
-    r"""Interpolate from a 2-D hardware profile table.
+    """2-D hardware profile lookup table."""
 
-    The profile is a JSON file::
-
-        {
-          "prefill": [[128, 120], [1024, 380], [4096, 980], [8192, 1700]],
-          "decode":  [[1, 5200], [8, 5500], [32, 6800], [128, 11000]],
-          "base_us": 120
-        }
-
-    For a mixed batch the model computes the *bottleneck*::
-
-        step_us = base_us + max(prefill_us(P), decode_us(D))
-
-    where *P* is the effective prefill token count (hits discounted).
-    """
+    _OVERLAP_FRACTION = 0.3
 
     def __init__(self, path: str | Path) -> None:
         with open(path, encoding="utf-8") as fh:
             raw = json.load(fh)
+        self._base_us = float(raw.get("base_us", 0.0))
+        self._prefill_x, self._prefill_y = self._parse(raw["prefill"])
+        self._decode_x, self._decode_y = self._parse(raw["decode"])
 
-        self._base_us: float = float(raw.get("base_us", 0.0))
-        self._prefill_x: list[int] = []
-        self._prefill_y: list[float] = []
-        for x, y in raw["prefill"]:
-            self._prefill_x.append(int(x))
-            self._prefill_y.append(float(y))
+    @staticmethod
+    def _parse(pairs: list) -> tuple[list[int], list[float]]:
+        xs, ys = [], []
+        for x, y in pairs:
+            xs.append(int(x))
+            ys.append(float(y))
+        return xs, ys
 
-        self._decode_x: list[int] = []
-        self._decode_y: list[float] = []
-        for x, y in raw["decode"]:
-            self._decode_x.append(int(x))
-            self._decode_y.append(float(y))
-
-    _OVERLAP_FRACTION = 0.3
-
-    def step_us(self, p_hit: int, p_miss: int, d_reqs: int, d_mult: int) -> float:
+    def step_us(
+        self, p_hit: int, p_miss: int, d_reqs: int, d_mult: int,
+        seq_len_sum_sqrt: float = 0.0, is_mixed: bool = False,
+    ) -> float:
         effective_p = p_miss + int(0.1 * p_hit)
         if effective_p <= 0 and d_reqs <= 0:
             return 0.0
@@ -112,7 +97,6 @@ class ProfileTimingModel:
         single = self._base_us + max(p_us, d_us) + self._OVERLAP_FRACTION * min(p_us, d_us)
         return single * max(d_mult, 1)
 
-    # ------------------------------------------------------------------
     @staticmethod
     def _lookup(xs: list[int], ys: list[float], n: int) -> float:
         if n <= 0:
@@ -130,12 +114,52 @@ class ProfileTimingModel:
 
 
 # ---------------------------------------------------------------------------
+# Analytical (physics-based)
+# ---------------------------------------------------------------------------
+
+
+class AnalyticalTimingModel:
+    r"""Physics-based model grounded in GPU kernel behaviour.
+
+    One forward pass costs::
+
+        step_us = [ α × N   (GEMM — total tokens)
+                  + β × Σ sqrt(L_i)   (Attention IO — KV cache scan)
+                  + γ × 1_{mixed} ]   (non-uniform batch penalty)
+                × d_mult              (jump-decoding multiplier)
+
+    *N*: effective tokens = p_miss + hit_discount × p_hit + d_reqs.
+    *L_i*: sequence length of each request in the batch.
+    *d_mult*: decode jump-depth (passes being simulated).
+    """
+
+    def __init__(self, config: EngineSimConfig) -> None:
+        self._alpha = config.analytical_alpha_us
+        self._beta = config.analytical_beta_us
+        self._gamma = config.analytical_gamma_us
+        self._hit_ratio = config.prefix_hit_cost_ratio
+
+    def step_us(
+        self, p_hit: int, p_miss: int, d_reqs: int, d_mult: int,
+        seq_len_sum_sqrt: float = 0.0, is_mixed: bool = False,
+    ) -> float:
+        N = p_miss + self._hit_ratio * p_hit + d_reqs
+        if N <= 0:
+            return 0.0
+        single = self._alpha * N + self._beta * seq_len_sum_sqrt
+        if is_mixed:
+            single += self._gamma
+        return single * max(d_mult, 1)
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
 
 def make_timing(config: EngineSimConfig) -> TimingModel:
-    """Create a timing model from config."""
     if config.timing_profile:
         return ProfileTimingModel(config.timing_profile)
+    if config.timing_model == "analytical":
+        return AnalyticalTimingModel(config)
     return LinearTimingModel(config)

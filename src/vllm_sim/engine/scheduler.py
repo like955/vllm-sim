@@ -1,5 +1,6 @@
 """FCFS scheduler with unified prefill+decode steps (vLLM-style)."""
 
+import math
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -132,7 +133,14 @@ class Scheduler:
             self._kv_cache.free_request(req.request_id)
 
         p_total = p_hit + p_miss
-        step_us = self._timing.step_us(p_hit, p_miss, d_reqs, d_mult)
+        # Attention IO factor: Σ sqrt(seq_len) for requests in this batch.
+        seq_len_sum_sqrt = sum(
+            math.sqrt(r.total_prompt_tokens + r.num_generated_tokens)
+            for r in self.running
+        )
+        is_mixed = p_total > 0 and d_reqs > 0
+        step_us = self._timing.step_us(p_hit, p_miss, d_reqs, d_mult,
+                                       seq_len_sum_sqrt, is_mixed)
         return StepResult(
             step_time_us=step_us,
             completed=completed,
