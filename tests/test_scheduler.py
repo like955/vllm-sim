@@ -136,10 +136,9 @@ class TestScheduler:
         assert req.is_prefill_complete
         assert req.status.name == "DECODING"
 
-        # Decode: one token per step (autoregressive), 3 steps to finish.
-        for i in range(3):
-            r = sched.step(clock_us=0)
-            assert req.num_generated_tokens == i + 1
+        # Decode: jump ahead when budget permits (3 tokens in 1 step).
+        r = sched.step(clock_us=0)
+        assert req.num_generated_tokens == 3
         assert req.is_finished
         assert req in r.completed
 

@@ -54,6 +54,10 @@ class EngineSimConfig(BaseModel):
     decode_base_us: float = Field(default=50.0, ge=0)
     """Fixed overhead per decode step (us)."""
 
+    timing_profile: str | None = Field(default=None)
+    """Path to a JSON profile file for ``ProfileTimingModel``.
+    When set, overrides the linear timing parameters."""
+
     # ------------------------------------------------------------------
     # Derived
     # ------------------------------------------------------------------

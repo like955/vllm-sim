@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 
 from vllm_sim.engine.config import EngineSimConfig
 from vllm_sim.kv_cache.manager import KVCacheManager
-from vllm_sim.timing.model import TimingModel
+from vllm_sim.timing.model import make_timing
 
 from .request import Request, RequestStatus
 
@@ -32,7 +32,7 @@ class Scheduler:
     def __init__(self, config: EngineSimConfig, kv_cache: KVCacheManager) -> None:
         self._cfg = config
         self._kv_cache = kv_cache
-        self._timing = TimingModel(config)
+        self._timing = make_timing(config)
 
         self.waiting: deque[Request] = deque()
         self.running: list[Request] = []
@@ -107,8 +107,8 @@ class Scheduler:
                     req.status = RequestStatus.DECODING
                     req.decode_start_us = clock_us
             else:
-                # Decoding — generate one token.
-                take = 1
+                # Decoding — jump ahead when budget permits (vLLM "jump decoding").
+                take = min(req.max_tokens - req.num_generated_tokens, budget)
                 req.num_generated_tokens += take
                 budget -= take
                 d_tokens += take
